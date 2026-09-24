@@ -1,111 +1,204 @@
 name: infra
 
-# Pipeline de infraestructura. Es dueno de la existencia y la configuracion
-# de la funcion, y no toca la imagen.
-
 on:
   pull_request:
     paths:
       - 'infra/**'
+      - '.github/workflows/infra.yml'
   push:
     branches:
       - main
     paths:
       - 'infra/**'
+      - '.github/workflows/infra.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
 
-  # TODO
-  # Verificar la sintaxis y la integridad del codigo de infraestructura:
-  # formato, inicializacion contra el backend remoto y validacion.
-  # Condicion de detencion: cualquiera de las tres comprobaciones falla.
-  # La configuracion del backend no esta en el codigo: llega por archivo.
-  # Sustituir el paso centinela por la implementacion.
+  # B1: formato, inicializacion y validacion
   validar:
     runs-on: ubuntu-latest
     steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'validar' no esta implementado."
-          exit 1
+      - name: Obtener repositorio
+        uses: actions/checkout@v4
 
-  # TODO
-  # Analizar el codigo declarado contra politicas de infraestructura.
-  #
-  # Condicion de detencion: un hallazgo de severidad alta o critica, salvo
-  # que este anotado como aceptado junto al recurso que lo origina, con
-  # identificador, razon, responsable y fecha de vencimiento.
-  #
-  # infra/main.tf ya trae una de esas anotaciones, sobre un hallazgo de
-  # severidad alta que no se puede corregir sin romper el diseno del pipeline
-  # de aplicacion. Leerla: es la forma que tiene que tener cualquier excepcion
-  # que ustedes agreguen. Y es el modo de comprobar que esta compuerta quedo
-  # bien armada: si detiene igual, la esta ignorando.
-  #
-  # El vencimiento no es decorativo: pasada esa fecha el hallazgo vuelve a
-  # contar y el pipeline se detiene solo.
-  #
-  # A diferencia de las compuertas del pipeline de aplicacion, esta detiene.
-  # Preferir una action del marketplace antes que instalar la herramienta.
-  # La guia del laboratorio lista las referencias disponibles.
-  #
-  # Sustituir el paso centinela por la implementacion.
+      - name: Configurar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.10.5'
+
+      - name: Configurar credenciales temporales de AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Comprobar formato
+        working-directory: infra
+        run: terraform fmt -check -recursive
+
+      - name: Inicializar backend remoto
+        working-directory: infra
+        run: terraform init -input=false -backend-config=backend.hcl
+
+      - name: Validar configuracion
+        working-directory: infra
+        run: terraform validate -no-color
+
+  # B2: politicas de infraestructura
   politicas:
     runs-on: ubuntu-latest
     steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'politicas' no esta implementado."
-          exit 1
+      - name: Obtener repositorio
+        uses: actions/checkout@v4
 
-  # TODO
-  # Calcular el plan, guardarlo en disco y exportarlo a tfplan.json.
-  # El plan que se aplica despues es el guardado aca, no uno recalculado.
-  #
-  # Sobre tfplan.json se implementan dos reglas. Las dos miran el efecto
-  # calculado del cambio, no el codigo fuente. Un analisis del codigo no
-  # puede responder si el plan destruye algo: eso depende del estado actual,
-  # no de lo declarado.
-  #
-  # Regla 1 · Ninguna accion de destruccion sin autorizacion.
-  #   El job falla si algun resource_change incluye la accion delete.
-  #   Un reemplazo cuenta como destruccion: el recurso que existia deja de
-  #   existir.
-  #   La autorizacion es deliberadamente incomoda. No puede venir del codigo
-  #   ni del propio plan, porque entonces la daria el mismo cambio que se
-  #   quiere controlar. Tiene que ser un acto humano y explicito, fuera del
-  #   disparo automatico.
-  #
-  # Regla 2 · El plan se publica en el pull request, en texto legible, para
-  #   que quien revisa vea la diferencia exacta antes de aprobar. Esta regla
-  #   no detiene: informa. Conviene que corra antes que la regla 1, para que
-  #   el plan quede visible aunque la compuerta detenga.
-  #
-  # Condicion de detencion: regla 1 incumplida. Esta compuerta detiene, y
-  # con ella el job aplicar no llega a ejecutarse.
-  #
-  # Sustituir el paso centinela por la implementacion.
+      - name: Analizar infraestructura con Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: config
+          scan-ref: infra
+          severity: HIGH,CRITICAL
+          format: table
+          exit-code: '1'
+
+  # B3: generar, publicar y controlar el plan
   plan:
     needs: [validar, politicas]
     runs-on: ubuntu-latest
-    steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'plan' no esta implementado."
-          exit 1
 
-  # TODO
-  # Aplicar el plan que produjo el job anterior, sin recalcularlo.
-  # Corre solo desde la rama principal y solo si la compuerta del plan paso.
-  # Condicion de detencion: el apply falla.
-  # Sustituir el paso centinela por la implementacion.
+    outputs:
+      tiene_destrucciones: ${{ steps.comprobar.outputs.tiene_destrucciones }}
+
+    steps:
+      - name: Obtener repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.10.5'
+          terraform_wrapper: false
+
+      - name: Configurar credenciales temporales de AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Inicializar backend remoto
+        working-directory: infra
+        run: terraform init -input=false -backend-config=backend.hcl
+
+      - name: Generar plan guardado
+        working-directory: infra
+        run: terraform plan -input=false -no-color -out=tfplan
+
+      - name: Exportar plan a JSON y texto
+        working-directory: infra
+        run: |
+          terraform show -json tfplan > tfplan.json
+          terraform show -no-color tfplan > tfplan.txt
+
+      - name: Publicar plan en el pull request
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          {
+            echo '### Plan de Terraform'
+            echo
+            echo '```text'
+            cat infra/tfplan.txt
+            echo '```'
+          } > comentario.md
+
+          gh pr comment "$PR" --body-file comentario.md
+
+      - name: Mostrar plan en el resumen
+        run: |
+          {
+            echo '### Plan de Terraform'
+            echo
+            echo '```text'
+            cat infra/tfplan.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comprobar acciones de destruccion
+        id: comprobar
+        working-directory: infra
+        run: |
+          set -euo pipefail
+
+          destrucciones="$(jq -r '
+            .resource_changes[]?
+            | select(.change.actions | index("delete"))
+            | .address
+          ' tfplan.json)"
+
+          if [ -n "$destrucciones" ]; then
+            echo "tiene_destrucciones=true" >> "$GITHUB_OUTPUT"
+            echo "::error::El plan contiene acciones de destruccion:"
+            echo "$destrucciones"
+            echo "Se requiere autorizacion humana explicita antes de aplicar este plan."
+            exit 1
+          fi
+
+          echo "tiene_destrucciones=false" >> "$GITHUB_OUTPUT"
+          echo "El plan no contiene acciones de destruccion."
+
+      - name: Guardar plan para el job aplicar
+        if: success() && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v4
+        with:
+          name: plan-terraform
+          path: infra/tfplan
+          if-no-files-found: error
+          retention-days: 1
+
+  # B4: aplicar exactamente el plan guardado
   aplicar:
     needs: plan
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+
     steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'aplicar' no esta implementado."
-          exit 1
+      - name: Obtener repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: '1.10.5'
+          terraform_wrapper: false
+
+      - name: Configurar credenciales temporales de AWS
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Descargar plan guardado
+        uses: actions/download-artifact@v4
+        with:
+          name: plan-terraform
+          path: infra/
+
+      - name: Inicializar backend remoto
+        working-directory: infra
+        run: terraform init -input=false -backend-config=backend.hcl
+
+      - name: Aplicar el plan guardado
+        working-directory: infra
+        run: terraform apply -input=false -no-color tfplan
