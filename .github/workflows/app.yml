@@ -128,34 +128,113 @@ jobs:
             cat semgrep.json
           fi
 
-  # A3 - Pendiente de implementar
+  # A3 - Construcción y publicación de la imagen en ECR
   publicar:
+    needs:
+      - calidad
+      - secretos
+      - dependencias
+      - estatico
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      needs.secretos.result == 'success' &&
+      needs.calidad.result == 'success' &&
+      needs.dependencias.result == 'success' &&
+      needs.estatico.result == 'success'
     runs-on: ubuntu-latest
-    steps:
-      - name: Sin implementar
-        run: |
-          echo "::error::El job 'publicar' no esta implementado."
-          exit 1
 
-  # Job de despliegue original: no modificar
-  desplegar:
-    needs: publicar
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.publicacion.outputs.digest }}
+
+    env:
+      APLICACION: inf384-lab3
+      VERSION: v1.0.0
+      AMBIENTE: dev
+      REGION: us-east-1
+
     steps:
-      - name: Credenciales temporales
+      - name: Obtener repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar credenciales temporales de AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
 
-      - name: Actualizar la funcion por digest
+      - name: Identificar cuenta y registro ECR
+        id: registro
+        shell: bash
         run: |
-          aws lambda update-function-code \
-            --function-name inf384-lab3 \
-            --image-uri ${{ needs.publicar.outputs.digest }}
+          set -euo pipefail
+          cuenta="$(aws sts get-caller-identity --query Account --output text)"
+          registro="${cuenta}.dkr.ecr.${REGION}.amazonaws.com"
+          echo "registro=${registro}" >> "$GITHUB_OUTPUT"
 
-      - name: Esperar a que la actualizacion termine
-        run: aws lambda wait function-updated --function-name inf384-lab3
+      - name: Iniciar sesión en ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Construir y publicar imagen con SHA corto
+        id: publicacion
+        shell: bash
+        env:
+          REGISTRO: ${{ steps.registro.outputs.registro }}
+        run: |
+          set -euo pipefail
+
+          repositorio="${REGISTRO}/${APLICACION}"
+          sha_corto="${GITHUB_SHA:0:7}"
+
+          docker build \
+            --platform linux/amd64 \
+            --label "org.opencontainers.image.title=${APLICACION}" \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --tag "${repositorio}:${sha_corto}" \
+            .
+
+          docker push "${repositorio}:${sha_corto}"
+
+          digest="$(aws ecr describe-images \
+            --repository-name "${APLICACION}" \
+            --image-ids "imageTag=${sha_corto}" \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)"
+
+          if [[ ! "${digest}" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo "::error::No se obtuvo un digest válido de ECR."
+            exit 1
+          fi
+
+          echo "digest=${repositorio}@${digest}" >> "$GITHUB_OUTPUT"
+
+          # Agregar los tags de versión y ambiente al mismo manifiesto.
+          # No se vuelven a enviar las capas de la imagen.
+          manifiesto="$(aws ecr batch-get-image \
+            --repository-name "${APLICACION}" \
+            --image-ids "imageDigest=${digest}" \
+            --query 'images[0].imageManifest' \
+            --output text)"
+
+          if [[ -z "${manifiesto}" || "${manifiesto}" == "None" ]]; then
+            echo "::error::No se pudo obtener el manifiesto publicado."
+            exit 1
+          fi
+
+          for etiqueta in "${VERSION}" "${AMBIENTE}"; do
+            aws ecr put-image \
+              --repository-name "${APLICACION}" \
+              --image-tag "${etiqueta}" \
+              --image-manifest "${manifiesto}"
+          done
+
+          {
+            echo "### Imagen publicada"
+            echo
+            echo "- Repositorio: \`${repositorio}\`"
+            echo "- SHA corto: \`${sha_corto}\`"
+            echo "- Versión: \`${VERSION}\`"
+            echo "- Ambiente: \`${AMBIENTE}\`"
+            echo "- Digest: \`${repositorio}@${digest}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
