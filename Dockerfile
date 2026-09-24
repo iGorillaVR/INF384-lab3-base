@@ -2,19 +2,28 @@
 # Contiene cinco malas practicas deliberadas. Cada una lleva su numero en la
 # linea anterior. Corregirlas es el bloque A1 de la guia del laboratorio.
 
-# defecto 1
-FROM public.ecr.aws/lambda/nodejs:latest
+# Etapa 1: Construccion
+FROM public.ecr.aws/lambda/nodejs:22 AS build
 
-# defecto 2
-COPY . .
+WORKDIR /app
 
-# defecto 3
-RUN npm install
+# Copiar manifiesto y lock file antes del codigo
+COPY package.json package-lock.json ./
 
-# defecto 4
-ENV DB_PASSWORD="inf384-clave-en-texto-plano"
+# Instalar dependencias desde el lock file
+RUN npm ci
 
-# defecto 5
-RUN dnf install -y procps-ng vim && dnf clean all
+# Copiar codigo fuente
+COPY src/ ./src/
 
-CMD ["src/handler.handler"]
+# Construir el artefacto empaquetado
+RUN npm run build
+
+# Etapa 2: Imagen final de Lambda
+FROM public.ecr.aws/lambda/nodejs:22
+
+# Copiar solamente el artefacto construido
+COPY --from=build /app/dist/handler.js ${LAMBDA_TASK_ROOT}/dist/handler.js
+
+# Ejecutar el handler empaquetado
+CMD ["dist/handler.handler"]
