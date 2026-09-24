@@ -63,12 +63,7 @@ resource "aws_ecr_repository_policy" "descarga_lambda" {
 
 # El nombre del grupo debe coincidir con el que Lambda usa por convencion,
 # o la funcion crea el suyo y esta retencion no aplica.
-resource "aws_cloudwatch_log_group" "funcion" {
-  name              = "/aws/lambda/${var.nombre_aplicacion}"
-  retention_in_days = 1
 
-  tags = local.etiquetas
-}
 
 resource "aws_lambda_function" "app" {
   function_name = var.nombre_aplicacion
@@ -92,10 +87,7 @@ resource "aws_lambda_function" "app" {
     ignore_changes = [image_uri]
   }
 
-  depends_on = [
-    aws_cloudwatch_log_group.funcion,
-    aws_ecr_repository_policy.descarga_lambda,
-  ]
+  depends_on = [aws_ecr_repository_policy.descarga_lambda]
 
   tags = local.etiquetas
 }
